@@ -23,6 +23,10 @@ const reply = (statusCode, payload, extra = {}) => ({
   body: JSON.stringify(payload),
 });
 
+// Netlify memotong function di ~30 dtk; batasi panggilan Gemini lebih awal
+// supaya pengunjung dapat pesan error yang jelas, bukan 504 kosong.
+const GEMINI_TIMEOUT_MS = 22000;
+
 function getConfig() {
   return {
     model: process.env.GEMINI_MODEL || "gemini-flash-latest",
@@ -135,14 +139,15 @@ export async function handler(event) {
 
     // Initialize Gemini
     const genAI = new GoogleGenerativeAI(config.apiKey);
-    const model = genAI.getGenerativeModel({
+    const model = genAI.getGenerativeModel(
+      {
       model: config.model,
       systemInstruction: SYSTEM_PROMPT,
       generationConfig: {
         temperature: 0.7,
         topP: 0.9,
         topK: 40,
-        maxOutputTokens: 1024,
+        maxOutputTokens: 2048,
       },
       safetySettings: [
         { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_MEDIUM_AND_ABOVE" },
@@ -150,7 +155,9 @@ export async function handler(event) {
         { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_MEDIUM_AND_ABOVE" },
         { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_MEDIUM_AND_ABOVE" },
       ],
-    });
+      },
+      { timeout: GEMINI_TIMEOUT_MS }
+    );
 
     // Build conversation
     const contents = buildContents(history, message);
@@ -162,14 +169,25 @@ export async function handler(event) {
 
     return reply(200, { reply: replyText });
   } catch (error) {
-    console.error("Gemini API error:", error?.message);
+    console.error("Gemini API error:", {
+      model: config.model,
+      name: error?.name,
+      status: error?.status,
+      message: error?.message,
+    });
 
-    // Handle specific errors
+    const msg = String(error?.message || "");
     let errorMessage = "Terjadi kesalahan pada layanan AI";
-    if (error.message?.includes("API_KEY")) errorMessage = "Konfigurasi API tidak valid";
-    else if (error.message?.includes("quota")) errorMessage = "Kuota API habis, coba lagi nanti";
-    else if (error.message?.includes("SAFETY")) errorMessage = "Pesan tidak dapat diproses";
+    let status = 500;
+    if (error?.name === "AbortError" || /abort|timeout|timed out/i.test(msg)) {
+      errorMessage = "AI terlalu lama merespons, coba lagi sebentar lagi";
+      status = 504;
+    } else if (error?.status === 429 || /quota|RESOURCE_EXHAUSTED|429/i.test(msg)) {
+      errorMessage = "Kuota API habis, coba lagi nanti";
+    } else if (/API_KEY|API key/i.test(msg)) errorMessage = "Konfigurasi API tidak valid";
+    else if (error?.status === 404 || /not found/i.test(msg)) errorMessage = "Model AI tidak ditemukan, periksa GEMINI_MODEL";
+    else if (/SAFETY/i.test(msg)) errorMessage = "Pesan tidak dapat diproses";
 
-    return reply(500, { error: errorMessage });
+    return reply(status, { error: errorMessage });
   }
 }

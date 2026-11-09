@@ -33,7 +33,7 @@ Bagian Experience, Education, dan Achievements di halaman About muncul otomatis 
 
 ### Konfigurasi ChatBot AI
 
-Knowledge base bot ada di **`netlify/functions/chat.mjs`** (variabel `SYSTEM_PROMPT`). Edit di sana untuk:
+Knowledge base bot ada di **`shared/systemPrompt.js`** (variabel `SYSTEM_PROMPT`, dipakai bersama oleh Vercel dan Netlify). Edit di sana untuk:
 - Menambah/kurangi info project, skill, pengalaman
 - Mengubah gaya bahasa / personality bot
 - Menambah aturan khusus (misal: jangan jawab pertanyaan sensitif)
@@ -84,7 +84,17 @@ File `netlify.toml` sudah mengatur:
 
 ```
 src/components/ChatBot.jsx      # UI Component (floating button, chat window)
-netlify/functions/chat.mjs       # Netlify Function (proxy ke Gemini API)
+api/chat.js                     # Vercel Function (proxy ke Gemini API)
+netlify/functions/chat.mjs      # Netlify Function (alternatif, endpoint sama: /api/chat)
+shared/systemPrompt.js          # Knowledge base & kepribadian bot
+vercel.json                     # Batas waktu function di Vercel
 netlify.toml                    # Netlify config (build, functions, redirects)
 .env.example                    # Template env vars
 ```
+
+## Deploy ke Vercel (chatbot ikut jalan)
+
+1. Vercel → project → **Settings → Git → Production Branch**: pilih `source` (branch berisi source code).
+2. **Settings → Build & Development**: Framework **Vite**, Build command `npm run build`, Output `dist`.
+3. **Settings → Environment Variables**: tambahkan `GEMINI_API_KEY` (dan opsional `GEMINI_MODEL`). Jangan isi `VITE_CHAT_API_URL`.
+4. Redeploy. Chatbot memanggil `/api/chat` di domain yang sama, tanpa CORS.

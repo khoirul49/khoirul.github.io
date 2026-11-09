@@ -6,6 +6,11 @@ const BOT_NAME = "Khoirul's AI";
 const BOT_AVATAR = "🤖";
 const WELCOME_MESSAGE = "Halo! Saya asisten AI Khoirul. Tanya saja soal skill, project, pengalaman, atau apa saja yang ingin kamu ketahui tentang portfolio ini. 😊";
 
+// Alamat endpoint chat. "/api/chat" jalan di Vercel (api/chat.js) dan di Netlify
+// (netlify.toml mengalihkannya ke function). Jika frontend di-host terpisah dari
+// function, isi VITE_CHAT_API_URL saat build dengan alamat lengkapnya.
+const CHAT_API_URL = import.meta.env.VITE_CHAT_API_URL || "/api/chat";
+
 // Detect if running on Vite dev server (ports 5173, 5174) where Netlify Functions don't exist
 const isViteDev = typeof window !== "undefined" &&
   (window.location.port === "5173" || window.location.port === "5174");
@@ -70,7 +75,7 @@ function ChatBotWidget() {
     setError(null);
 
     try {
-      const response = await fetch("/.netlify/functions/chat", {
+      const response = await fetch(CHAT_API_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

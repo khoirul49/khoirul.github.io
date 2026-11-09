@@ -25,11 +25,23 @@ const reply = (statusCode, payload, extra = {}) => ({
 
 // Netlify memotong function di ~30 dtk; batasi panggilan Gemini lebih awal
 // supaya pengunjung dapat pesan error yang jelas, bukan 504 kosong.
-const GEMINI_TIMEOUT_MS = 22000;
+const GEMINI_TIMEOUT_MS = 10000; // per percobaan
+const TOTAL_BUDGET_MS = 25000;   // total semua percobaan
+
+// Model cadangan dicoba berurutan jika model utama sibuk (503), kena limit (429)
+// atau sudah tidak tersedia (404). Bisa diganti lewat GEMINI_FALLBACK_MODELS
+// (pisahkan dengan koma).
+const DEFAULT_FALLBACKS = ["gemini-3.1-flash-lite", "gemini-2.5-flash"];
 
 function getConfig() {
+  const primary = process.env.GEMINI_MODEL || "gemini-flash-latest";
+  const fallbacks = (process.env.GEMINI_FALLBACK_MODELS || DEFAULT_FALLBACKS.join(","))
+    .split(",")
+    .map((m) => m.trim())
+    .filter(Boolean);
   return {
-    model: process.env.GEMINI_MODEL || "gemini-flash-latest",
+    model: primary,
+    models: [primary, ...fallbacks.filter((m) => m !== primary)],
     apiKey: process.env.GEMINI_API_KEY,
   };
 }
@@ -137,35 +149,47 @@ export async function handler(event) {
       return reply(400, { error: "Invalid message" });
     }
 
-    // Initialize Gemini
     const genAI = new GoogleGenerativeAI(config.apiKey);
-    const model = genAI.getGenerativeModel(
-      {
-      model: config.model,
-      systemInstruction: SYSTEM_PROMPT,
-      generationConfig: {
-        temperature: 0.7,
-        topP: 0.9,
-        topK: 40,
-        maxOutputTokens: 2048,
-      },
-      safetySettings: [
-        { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_MEDIUM_AND_ABOVE" },
-        { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_MEDIUM_AND_ABOVE" },
-        { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_MEDIUM_AND_ABOVE" },
-        { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_MEDIUM_AND_ABOVE" },
-      ],
-      },
-      { timeout: GEMINI_TIMEOUT_MS }
-    );
-
-    // Build conversation
     const contents = buildContents(history, message);
+    const startedAt = Date.now();
 
-    // Generate response
-    const result = await model.generateContent({ contents });
-    const response = result.response;
-    const replyText = response.text();
+    const generationConfig = { temperature: 0.7, topP: 0.9, topK: 40, maxOutputTokens: 2048 };
+    const safetySettings = [
+      { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_MEDIUM_AND_ABOVE" },
+      { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_MEDIUM_AND_ABOVE" },
+      { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_MEDIUM_AND_ABOVE" },
+      { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_MEDIUM_AND_ABOVE" },
+    ];
+
+    let replyText = null;
+    let lastError = null;
+
+    for (const modelName of config.models) {
+      const remaining = TOTAL_BUDGET_MS - (Date.now() - startedAt);
+      if (remaining < 3000) break; // sisa waktu terlalu sedikit
+
+      try {
+        const model = genAI.getGenerativeModel(
+          { model: modelName, systemInstruction: SYSTEM_PROMPT, generationConfig, safetySettings },
+          { timeout: Math.min(GEMINI_TIMEOUT_MS, remaining) }
+        );
+        const result = await model.generateContent({ contents });
+        replyText = result.response.text();
+        if (modelName !== config.model) console.log("Fallback model dipakai:", modelName);
+        break;
+      } catch (err) {
+        lastError = err;
+        console.error("Gemini gagal:", { model: modelName, status: err?.status, message: err?.message });
+        const m = String(err?.message || "");
+        const retryable =
+          [429, 500, 503, 404].includes(err?.status) ||
+          /overloaded|high demand|unavailable|quota|RESOURCE_EXHAUSTED|not found|abort|timeout|timed out/i.test(m) ||
+          err?.name === "AbortError";
+        if (!retryable) throw err; // key salah, safety, dll: jangan ganti model
+      }
+    }
+
+    if (replyText === null) throw lastError || new Error("Tidak ada model yang tersedia");
 
     return reply(200, { reply: replyText });
   } catch (error) {
@@ -184,9 +208,18 @@ export async function handler(event) {
       status = 504;
     } else if (error?.status === 429 || /quota|RESOURCE_EXHAUSTED|429/i.test(msg)) {
       errorMessage = "Kuota API habis, coba lagi nanti";
+    } else if (error?.status === 503 || /overloaded|unavailable|503/i.test(msg)) {
+      errorMessage = "Layanan AI sedang sibuk, coba lagi sebentar lagi";
+      status = 503;
     } else if (/API_KEY|API key/i.test(msg)) errorMessage = "Konfigurasi API tidak valid";
     else if (error?.status === 404 || /not found/i.test(msg)) errorMessage = "Model AI tidak ditemukan, periksa GEMINI_MODEL";
     else if (/SAFETY/i.test(msg)) errorMessage = "Pesan tidak dapat diproses";
+
+    // Mode debug: set CHAT_DEBUG=1 di Netlify untuk melihat penyebab asli di chat.
+    // Matikan lagi setelah selesai agar detail error tidak terlihat pengunjung.
+    if (process.env.CHAT_DEBUG === "1") {
+      errorMessage += ` [debug: ${msg.slice(0, 300)}]`;
+    }
 
     return reply(status, { error: errorMessage });
   }
